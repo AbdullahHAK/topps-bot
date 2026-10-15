@@ -1,7 +1,5 @@
 .venv/
 __pycache__/
 *.pyc
-build/
 dist/
-*.spec
-.test-profile/
+tests/dashboard.png
