@@ -1,14 +1,16 @@
 // Bot engine (service worker).
 //
-// Stock checks and cart calls run *inside a pinned topps.com tab* (chrome.scripting), so they are
-// ordinary same-origin requests with the user's own cookies and Cloudflare clearance.
-// Checkout runs in a separate tab, driven by checkout.js.
+// topps.com is a Next.js storefront on top of Shopify:
+// - Stock check: the product page HTML is fetched from inside a pinned topps.com tab (same-origin, the user's
+//   own cookies and Cloudflare clearance) and the embedded variant data (availableForSale, price) is read.
+// - Buy: a tab opens the product page; the page's own option / quantity / "Add to cart" controls are used,
+//   then "Continue to Checkout" leads to Shopify checkout on shop.topps.com, driven by checkout.js.
 //
 // storage.local keys: products, settings, running, statuses, log, run (state of the current run).
 
 import {
-  CHECKOUT_TIMEOUT_MS, DEFAULT_ORIGIN, DEFAULT_SELECTORS, DEFAULT_SETTINGS, MAX_FAILURES,
-  originOf, productHandle, shortName, siteOf, variantFromUrl,
+  CART_COOKIES, CHECKOUT_TIMEOUT_MS, DEFAULT_ORIGIN, DEFAULT_SELECTORS, DEFAULT_SETTINGS, MAX_FAILURES,
+  originOf, productHandle, shortName, siteOf,
 } from './common.js';
 
 const LOG_MAX = 400;
@@ -40,6 +42,10 @@ const setStatus = (id, text, kind = '') =>
 async function getSettings() {
   const { settings } = await get('settings');
   return { ...DEFAULT_SETTINGS, ...settings };
+}
+
+async function getSelectors() {
+  return { ...DEFAULT_SELECTORS, ...(await getSettings()).selectors };
 }
 
 async function getRun() {
@@ -79,7 +85,7 @@ async function focusTab(tabId) {
   }
 }
 
-// ---------- worker tab (runs the stock / cart requests) ----------
+// ---------- tabs ----------
 
 function waitForTabLoad(tabId, timeout = 45000) {
   return new Promise((resolve) => {
@@ -97,6 +103,16 @@ function waitForTabLoad(tabId, timeout = 45000) {
   });
 }
 
+async function runInTab(tabId, func, ...args) {
+  try {
+    const [result] = await chrome.scripting.executeScript({ target: { tabId }, func, args });
+    return result?.result ?? { error: 'No result from the page' };
+  } catch (e) {
+    return { error: String(e.message || e) };
+  }
+}
+
+// The pinned tab that runs the stock checks.
 async function workerTab(origin) {
   const run = await getRun();
   if (run.workerTabId != null) {
@@ -118,60 +134,134 @@ async function inWorker(origin, func, ...args) {
   try {
     const tab = await workerTab(origin);
     if (tab.status !== 'complete') await waitForTabLoad(tab.id, 20000);
-    const [result] = await chrome.scripting.executeScript({ target: { tabId: tab.id }, func, args });
-    return result?.result ?? { error: 'No result from the Topps tab' };
+    return await runInTab(tab.id, func, ...args);
   } catch (e) {
     return { error: String(e.message || e) };
   }
 }
 
-// --- These run inside the topps.com page; they must be self-contained. ---
+// Deleting the cart cookies makes topps.com start a fresh, empty cart.
+async function clearCart(origin) {
+  const cookies = await chrome.cookies.getAll({ domain: new URL(origin).hostname.replace(/^www\./, '') });
+  let removed = 0;
+  for (const c of cookies.filter((x) => CART_COOKIES.includes(x.name))) {
+    const host = c.domain.replace(/^\./, '');
+    await chrome.cookies.remove({ url: `http${c.secure ? 's' : ''}://${host}${c.path}`, name: c.name });
+    removed += 1;
+  }
+  if (removed) await log('Cart emptied');
+}
 
-async function pageProduct(handle, variantId) {
+// ---------- functions injected into topps.com pages (must be self-contained) ----------
+
+// Runs in the pinned tab: reads stock and price of every variant from the product page HTML.
+async function pageProduct(path, option) {
   try {
-    const r = await fetch(`/products/${encodeURIComponent(handle)}.js`, {
-      cache: 'no-store', headers: { Accept: 'application/json' },
-    });
-    const type = r.headers.get('content-type') || '';
+    const r = await fetch(path, { cache: 'no-store', credentials: 'same-origin' });
+    const html = await r.text();
+    if ([403, 429, 503].includes(r.status) || /<title>\s*Just a moment/i.test(html)) return { challenge: true };
     if (r.status === 404) return { error: 'Product not found (404)' };
-    if (!type.includes('json')) {
-      const blocked = [403, 429, 503].includes(r.status) || /just a moment/i.test(document.title);
-      return blocked ? { challenge: true } : { error: `Unexpected response (HTTP ${r.status})` };
-    }
     if (!r.ok) return { error: `HTTP ${r.status}` };
-    const p = await r.json();
-    const variants = p.variants || [];
-    const v = variants.find((x) => String(x.id) === String(variantId))
-      || variants.find((x) => x.available) || variants[0];
-    if (!v) return { error: 'Product has no variants' };
-    return { title: p.title, variant: { id: v.id, title: v.title, available: !!v.available, price: v.price } };
+
+    const text = html.replace(/\\"/g, '"');
+    const variants = new Map();
+    const productRe = /"price":\{"amount":"([\d.]+)","currencyCode":"[A-Z]+"\},"compareAtPrice":(?:null|\{[^}]*\}),"id":"gid:\/\/shopify\/ProductVariant\/(\d+)","sku":"[^"]*","title":"([^"]*)","availableForSale":(true|false)/g;
+    for (const m of text.matchAll(productRe)) {
+      variants.set(m[2], { id: m[2], price: Number(m[1]), title: m[3], available: m[4] === 'true' });
+    }
+    if (!variants.size) {
+      const buyBoxRe = /"title":"([^"]*)","price":([\d.]+),"option_type_id":"gid:\/\/shopify\/ProductVariant\/(\d+)","compareAtPrice":[^,]*,"sku":"[^"]*","availableForSale":(true|false)/g;
+      for (const m of text.matchAll(buyBoxRe)) {
+        variants.set(m[3], { id: m[3], price: Number(m[2]), title: m[1], available: m[4] === 'true' });
+      }
+    }
+    if (!variants.size) return { error: 'Could not read product data - the page layout may have changed' };
+
+    const all = [...variants.values()];
+    let variant;
+    if (option) {
+      const want = option.trim().toLowerCase();
+      variant = all.find((v) => v.title.toLowerCase() === want);
+      if (!variant) return { error: `Option "${option}" not found (options: ${all.map((v) => v.title).join(', ')})` };
+    } else {
+      variant = all.find((v) => v.available) || all[0];
+    }
+    const title = (html.match(/<title>([^<]*)<\/title>/i) || [])[1] || '';
+    return { title: title.replace(/&amp;/g, '&').trim(), variant };
   } catch (e) {
     return { error: String(e.message || e) };
   }
 }
 
-async function pageCartAdd(variantId, quantity) {
-  try {
-    const r = await fetch('/cart/add.js', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json', Accept: 'application/json' },
-      body: JSON.stringify({ items: [{ id: variantId, quantity }] }),
-    });
-    const body = await r.json().catch(() => ({}));
-    if (!r.ok) return { error: body.description || body.message || `HTTP ${r.status}` };
-    return { ok: true };
-  } catch (e) {
-    return { error: String(e.message || e) };
+// Runs in the buy tab on the product page: picks the option, sets quantity and clicks "Add to cart".
+async function pageAddToCart(option, quantity, S) {
+  const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+  const waitFor = async (fn, timeout) => {
+    const end = Date.now() + timeout;
+    while (Date.now() < end) {
+      const value = fn();
+      if (value) return value;
+      await sleep(200);
+    }
+    return null;
+  };
+  const addButton = () => document.querySelector(S.addToCartButton);
+  const continueButton = () => [...document.querySelectorAll('a, button')]
+    .find((e) => /continue to checkout/i.test(e.textContent) && e.getClientRects().length);
+
+  if (!(await waitFor(addButton, 30000))) return { error: 'Add to cart button not found' };
+  await sleep(1500); // let the page finish hydrating so clicks are handled
+
+  if (option) {
+    const want = option.trim().toLowerCase();
+    const radio = [...document.querySelectorAll(S.optionRadio)]
+      .find((r) => (r.getAttribute('aria-label') || '').split(' - ')[0].trim().toLowerCase() === want);
+    if (!radio) return { error: `Option "${option}" is not on the page` };
+    if (!radio.checked) {
+      (radio.closest('label') || radio).click();
+      await sleep(500);
+    }
   }
+
+  const qty = document.querySelector(S.quantityInput);
+  const plus = document.querySelector(S.quantityPlus);
+  if (qty && plus) {
+    for (let i = 0; i < 99 && Number(qty.value) < quantity && !plus.disabled; i++) {
+      plus.click();
+      await sleep(150);
+    }
+    if (Number(qty.value) !== quantity) return { error: `Could not set quantity to ${quantity} (page allows ${qty.value})` };
+  }
+
+  const button = addButton();
+  if (button.disabled || /sold out|out of stock/i.test(button.textContent)) return { error: 'Sold out' };
+  button.click();
+
+  const result = await waitFor(() => {
+    if (continueButton() || /added to cart/i.test(document.body.innerText)) return { ok: true };
+    const error = document.body.innerText.match(
+      /(You've hit the limit[^\n]*|You can only add[^\n]*|You have already ordered[^\n]*|Error adding to cart|Failed to add to cart|[^\n]*can't be added to the cart|You must sign in to add this item[^\n]*)/i,
+    );
+    return error ? { error: error[1].trim() } : null;
+  }, 20000);
+  return result || { error: 'No confirmation after clicking Add to cart' };
 }
 
-async function pageCartClear() {
-  try {
-    const r = await fetch('/cart/clear.js', { method: 'POST', headers: { Accept: 'application/json' } });
-    return r.ok ? { ok: true } : { error: `HTTP ${r.status}` };
-  } catch (e) {
-    return { error: String(e.message || e) };
+// Runs in the buy tab after adding: clicks "Continue to Checkout" in the cart pop-up or "Proceed to checkout" on the cart page.
+async function pageGoToCheckout(timeout) {
+  const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+  const end = Date.now() + timeout;
+  while (Date.now() < end) {
+    if (/your cart's empty/i.test(document.body.innerText)) return { error: 'Cart is empty - the item was not added' };
+    const button = [...document.querySelectorAll('a, button')]
+      .find((e) => /continue to checkout|proceed to checkout/i.test(e.textContent) && e.getClientRects().length && !e.disabled);
+    if (button) {
+      button.click();
+      return { ok: true };
+    }
+    await sleep(250);
   }
+  return { error: 'Checkout button not found' };
 }
 
 // ---------- run control ----------
@@ -251,7 +341,7 @@ async function checkProducts(products, settings) {
   for (const p of active) {
     run = await getRun();
     if (run.checkout?.productId === p.id) continue; // its checkout tab is open
-    const result = await inWorker(origin, pageProduct, productHandle(p.url), variantFromUrl(p.url));
+    const result = await inWorker(origin, pageProduct, new URL(p.url).pathname, p.option || '');
 
     if (result.challenge) return onChallenge(origin, active);
     if (run.challenge) {
@@ -264,16 +354,15 @@ async function checkProducts(products, settings) {
     }
 
     const { variant } = result;
-    const price = variant.price / 100;
-    const priceText = ` ($${price.toFixed(2)})`;
+    const label = `${variant.title} $${variant.price.toFixed(2)}`;
     if (!variant.available) {
-      setStatus(p.id, `Out of stock${priceText}`);
-    } else if (p.maxPrice > 0 && price > p.maxPrice) {
-      setStatus(p.id, `In stock but $${price.toFixed(2)} is over max $${Number(p.maxPrice).toFixed(2)}`, 'bad');
+      setStatus(p.id, `Out of stock (${label})`);
+    } else if (p.maxPrice > 0 && variant.price > p.maxPrice) {
+      setStatus(p.id, `In stock but $${variant.price.toFixed(2)} is over max $${Number(p.maxPrice).toFixed(2)}`, 'bad');
     } else if (run.checkout) {
-      setStatus(p.id, `In stock${priceText} - waiting for the current checkout to finish`, 'good');
+      setStatus(p.id, `In stock (${label}) - waiting for the current checkout to finish`, 'good');
     } else {
-      await log(`${result.title || shortName(p.url)}: IN STOCK${priceText}`);
+      await log(`${result.title || shortName(p.url)}: IN STOCK (${label})`);
       await buy(p, variant, result.title || shortName(p.url), origin, settings);
     }
   }
@@ -292,20 +381,34 @@ async function onChallenge(origin, active) {
 }
 
 async function buy(p, variant, name, origin, settings) {
-  await updateRun((r) => ({ ...r, checkout: { productId: p.id, tabId: null, started: Date.now() } }));
-  alertUser('In stock!', `${name} - adding ${p.quantity} to cart`);
-  setStatus(p.id, `Adding ${p.quantity} to cart...`, 'good');
-
-  if (settings.clearCart) await inWorker(origin, pageCartClear);
-  const added = await inWorker(origin, pageCartAdd, variant.id, Number(p.quantity) || 1);
-  if (!added.ok) return failed(p, `Add to cart failed: ${added.error}`);
-
-  await log(`${name}: added ${p.quantity} to cart - opening checkout`);
-  setStatus(p.id, 'In cart - checking out...', 'good');
+  const qty = Number(p.quantity) || 1;
   // Create the tab first so its id is stored before checkout.js asks whether to drive it.
   const tab = await chrome.tabs.create({ url: 'about:blank', active: true });
-  await updateRun((r) => ({ ...r, checkout: { ...r.checkout, tabId: tab.id } }));
-  await chrome.tabs.update(tab.id, { url: `${origin}/checkout` });
+  await updateRun((r) => ({ ...r, checkout: { productId: p.id, tabId: tab.id, started: Date.now() } }));
+  alertUser('In stock!', `${name} - adding ${qty} x ${variant.title} to cart`);
+  if (settings.clearCart) await clearCart(origin);
+
+  setStatus(p.id, `Adding ${qty} x ${variant.title} to cart...`, 'good');
+  await chrome.tabs.update(tab.id, { url: p.url });
+  await waitForTabLoad(tab.id);
+  const selectors = await getSelectors();
+  const giveUp = async (reason) => {
+    await failed(p, reason);
+    chrome.tabs.remove(tab.id).catch(() => {});
+  };
+  const added = await runInTab(tab.id, pageAddToCart, p.option || variant.title, qty, selectors);
+  if (!added.ok) return giveUp(`Add to cart failed: ${added.error}`);
+
+  await log(`${name}: added ${qty} x ${variant.title} to cart - going to checkout`);
+  setStatus(p.id, 'In cart - opening checkout...', 'good');
+  let toCheckout = await runInTab(tab.id, pageGoToCheckout, 5000);
+  if (!toCheckout.ok) {
+    await chrome.tabs.update(tab.id, { url: `${origin}/checkout/cart` });
+    await waitForTabLoad(tab.id);
+    toCheckout = await runInTab(tab.id, pageGoToCheckout, 20000);
+  }
+  if (!toCheckout.ok) return giveUp(`Could not open checkout: ${toCheckout.error}`);
+  // From here checkout.js takes over in the same tab.
 }
 
 async function failed(p, reason) {
@@ -349,7 +452,7 @@ async function onCheckoutMessage(msg, sender) {
 
   switch (msg.type) {
     case 'checkout:hello':
-      return { drive: true, testMode: settings.testMode, selectors: { ...DEFAULT_SELECTORS, ...settings.selectors } };
+      return { drive: true, testMode: settings.testMode, selectors: await getSelectors() };
     case 'checkout:status':
       setStatus(p.id, msg.text, 'good');
       return {};
@@ -361,7 +464,7 @@ async function onCheckoutMessage(msg, sender) {
     case 'checkout:test_ok':
       setStatus(p.id, 'TEST OK - checkout reached, Pay button found (not clicked)', 'good');
       await log(`${name}: test run reached the Pay button - no order placed`);
-      if (settings.clearCart) await inWorker(originOf(p.url), pageCartClear);
+      if (settings.clearCart) await clearCart(originOf(p.url));
       await finishProduct(p.id);
       return {};
     case 'checkout:success': {
@@ -385,7 +488,7 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
     openLogin: async () => {
       const { products = [] } = await get('products');
       const origin = products[0] ? originOf(products[0].url) : DEFAULT_ORIGIN;
-      await chrome.tabs.create({ url: `${origin}/account/login`, active: true });
+      await chrome.tabs.create({ url: `${origin}/customer/account/login`, active: true });
     },
   };
   const work = msg.type?.startsWith('checkout:') ? onCheckoutMessage(msg, sender) : handlers[msg.type]?.();

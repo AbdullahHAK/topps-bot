@@ -11,11 +11,18 @@ export const DEFAULT_SETTINGS = {
   selectors: {}, // overrides for DEFAULT_SELECTORS, edited in the dashboard's Advanced section
 };
 
-// Shopify checkout markup. Overridable from the dashboard if Topps/Shopify changes it.
+// Page markup the bot relies on. Overridable from the dashboard if Topps/Shopify changes it.
 export const DEFAULT_SELECTORS = {
+  addToCartButton: '[data-testid="product-add-to-cart"]',
+  optionRadio: 'input[name="variant-options"]',
+  quantityInput: 'input[name="quantity"]',
+  quantityPlus: 'button[aria-label="Increase quantity by one"]',
   payButton: '#checkout-pay-button',
   thankYouUrl: 'thank[-_]you|/orders/',
 };
+
+// Cookies that hold the topps.com cart; deleting them gives an empty cart.
+export const CART_COOKIES = ['cart_id', 'last_cart_items_ids'];
 
 export const MAX_FAILURES = 5;
 export const CHECKOUT_TIMEOUT_MS = 15 * 60 * 1000;

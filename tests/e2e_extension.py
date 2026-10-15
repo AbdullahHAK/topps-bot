@@ -1,5 +1,5 @@
 """End-to-end test: loads the real extension into Playwright's Chromium and drives its dashboard
-against tests/mock_shop.py (a fake Shopify store).
+against tests/mock_shop.py (a fake topps.com with Shopify-style checkout).
 
 Usage:  .venv\\Scripts\\python -m tests.e2e_extension
 """
@@ -14,7 +14,7 @@ from pathlib import Path
 
 from playwright.sync_api import sync_playwright
 
-from tests.mock_shop import STATE, VARIANT_ID, reset, serve
+from tests.mock_shop import STATE, reset, serve
 
 ROOT = Path(__file__).resolve().parent.parent
 SHOP = "http://127.0.0.1:8766"
@@ -75,53 +75,71 @@ def main() -> int:
             def log_text() -> str:
                 return dash.locator("#log").inner_text()
 
+            def cart_cookie():
+                return [c for c in ctx.cookies(SHOP) if c["name"] == "cart_id"]
+
+            def row_input(index: int):
+                return dash.locator("#products tbody input").nth(index)  # 0 option, 1 qty, 2 max price
+
+            def set_input(index: int, value: str):
+                row_input(index).fill(value)
+                row_input(index).dispatch_event("change")
+
             # Fast intervals for the test (the dashboard enforces >= 5 s for real use).
             dash.evaluate("chrome.storage.local.set({settings: {intervalMin: 1, intervalMax: 2, testMode: true,"
                           " clearCart: true, sound: false, selectors: {}}})")
             dash.reload()
 
-            print("0) Dashboard rejects non-product URLs, accepts a product URL")
+            print("0) Dashboard rejects non-product URLs, accepts a product URL with option + qty")
             dash.fill("#url", f"{SHOP}/collections/all")
             dash.click("#add-form button[type=submit]")
             assert dash.locator("#form-error").is_visible()
             dash.fill("#url", URL)
+            dash.fill("#option", "5 cards")
             dash.fill("#qty", "2")
             dash.click("#add-form button[type=submit]")
             wait_until(lambda: dash.locator("#products tbody tr").count() == 1, "product row")
-            assert storage("products")[0]["quantity"] == 2
+            assert storage("products")[0]["option"] == "5 cards" and storage("products")[0]["quantity"] == 2
 
-            print("1) Test mode: out of stock -> restock -> checkout reached, Pay not clicked")
+            print("1) Test mode: out of stock -> restock -> checkout reached, Pay not clicked, cart emptied")
             reset()
-            STATE["cart"] = [(1, 1)]  # stale item must be cleared
             dash.click("#start")
-            wait_until(has_status("Out of stock ($49.99)"), "out of stock status")
+            wait_until(has_status("Out of stock (5 cards $34.99)"), "out of stock status")
             assert dash.locator("#state").inner_text() == "RUNNING - TEST MODE"
             STATE["stock"] = True
-            wait_until(has_status("TEST OK"), "test mode reached Pay button")
+            wait_until(has_status("TEST OK"), "test mode reached Pay button", timeout=60)
             wait_until(stopped, "auto stop after all products done")
             assert STATE["orders"] == [], STATE["orders"]
-            assert STATE["cart"] == [], f"cart should be emptied after a test run: {STATE['cart']}"
+            assert cart_cookie() == [], f"cart cookie should be removed after a test run: {cart_cookie()}"
 
             print("2) Max price below product price -> does not buy")
-            dash.locator("#products tbody input").nth(1).fill("10")
-            dash.locator("#products tbody input").nth(1).dispatch_event("change")
+            set_input(2, "10")
             dash.click("#start")
             wait_until(has_status("over max $10.00"), "over max price status")
             dash.click("#stop")
             wait_until(stopped, "stop")
-            assert STATE["orders"] == [] and STATE["cart"] == []
-            dash.locator("#products tbody input").nth(1).fill("")
-            dash.locator("#products tbody input").nth(1).dispatch_event("change")
+            assert STATE["orders"] == []
+            set_input(2, "")
 
-            print("3) Live mode, qty 2 -> order placed with confirmation number")
-            dash.uncheck("#testMode")
+            print("3) Purchase limit error from the site -> reported, retried")
+            STATE["limit"] = 1
             dash.click("#start")
-            wait_until(has_status("ORDER PLACED #T0PPS1"), "order placed")
-            assert STATE["orders"] == [[(VARIANT_ID, 2)]], STATE["orders"]
+            wait_until(has_status("hit the limit"), "limit error status", timeout=60)
+            dash.click("#stop")
+            wait_until(stopped, "stop")
+            STATE["limit"] = 0
+
+            print("4) Live mode with a stale cart -> cart emptied, agreement ticked, order placed")
+            dash.uncheck("#testMode")
+            STATE["carts"]["stale"] = [("111", 9)]
+            ctx.add_cookies([{"name": "cart_id", "value": "stale", "url": SHOP}])
+            dash.click("#start")
+            wait_until(has_status("ORDER PLACED #T0PPS1"), "order placed", timeout=60)
+            assert STATE["orders"] == [{"items": [("555", 2)], "marketing": False}], STATE["orders"]
             wait_until(stopped, "auto stop")
             assert dash.locator("#state").inner_text() == "STOPPED"
 
-            print("4) Cloudflare challenge -> alert, waits, resumes after it is solved")
+            print("5) Cloudflare challenge -> alert, waits, resumes after it is solved")
             STATE.update(stock=False, challenge=True)
             dash.click("#start")
             wait_until(has_status("Cloudflare check"), "challenge status")
@@ -132,19 +150,19 @@ def main() -> int:
             dash.click("#stop")
             wait_until(stopped, "stop")
 
-            print("5) Payment not filled in -> hands checkout over to the user")
+            print("6) Payment not filled in -> hands checkout over to the user")
             STATE.update(stock=True, payment_ready=False)
             dash.click("#start")
-            wait_until(has_status("Waiting for you to finish checkout"), "hand-over status", timeout=60)
-            assert STATE["orders"] == [[(VARIANT_ID, 2)]], "no new order expected"
+            wait_until(has_status("Waiting for you to finish checkout"), "hand-over status", timeout=90)
+            assert len(STATE["orders"]) == 1, "no new order expected"
             print("   user completes payment by hand...")
             STATE["payment_ready"] = True
-            checkout = next(p for p in reversed(ctx.pages) if p.url.endswith("/checkouts/cn/tok123"))
+            checkout = next(p for p in reversed(ctx.pages) if p.url.endswith("/en-us"))
             checkout.click("#checkout-pay-button")
             wait_until(has_status("ORDER PLACED #T0PPS2"), "order placed after manual finish")
             wait_until(stopped, "auto stop")
 
-            print("6) Closing the pinned Topps tab -> bot reopens it")
+            print("7) Closing the pinned Topps tab -> bot reopens it")
             dash.check("#testMode")
             STATE.update(stock=False)
             dash.click("#start")

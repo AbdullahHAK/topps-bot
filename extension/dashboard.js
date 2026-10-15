@@ -29,6 +29,16 @@ function renderProducts() {
     const link = Object.assign(document.createElement('a'), { href: p.url, target: '_blank', textContent: shortName(p.url), title: p.url });
     name.append(link);
 
+    const option = document.createElement('td');
+    const optionInput = Object.assign(document.createElement('input'), {
+      type: 'text', value: p.option || '', placeholder: 'Any in stock', className: 'option-input',
+    });
+    optionInput.addEventListener('change', () => {
+      p.option = optionInput.value.trim();
+      saveProducts();
+    });
+    option.append(optionInput);
+
     const qty = document.createElement('td');
     qty.append(numberInput(p.quantity, { min: 1, max: 99 }, (input) => {
       p.quantity = Math.min(99, Math.max(1, parseInt(input.value, 10) || 1));
@@ -53,7 +63,7 @@ function renderProducts() {
     });
     remove.append(button);
 
-    row.append(name, qty, max, status, remove);
+    row.append(name, option, qty, max, status, remove);
     body.append(row);
   }
   $('empty').hidden = products.length > 0;
@@ -80,12 +90,14 @@ $('add-form').addEventListener('submit', (event) => {
   products.push({
     id: newId(),
     url,
+    option: $('option').value.trim(),
     quantity: Math.min(99, Math.max(1, parseInt($('qty').value, 10) || 1)),
     maxPrice: Math.max(0, parseFloat($('max').value) || 0),
   });
   saveProducts();
   renderProducts();
   $('url').value = '';
+  $('option').value = '';
 });
 
 // ---------- settings ----------

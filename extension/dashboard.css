@@ -62,6 +62,7 @@ input, textarea {
   padding: 6px 8px;
 }
 input[type="number"] { width: 90px; }
+input.option-input, #option { width: 140px; }
 input[type="checkbox"] { width: auto; vertical-align: middle; }
 textarea { width: 100%; font-family: Consolas, monospace; margin: 8px 0; }
 button {

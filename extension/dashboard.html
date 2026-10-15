@@ -23,6 +23,7 @@
       <h2>Products to monitor</h2>
       <form id="add-form">
         <input id="url" type="url" placeholder="Paste a topps.com product URL (https://www.topps.com/products/...)" required>
+        <label>Option <input id="option" type="text" placeholder="e.g. 5 cards (optional)"></label>
         <label>Qty <input id="qty" type="number" min="1" max="99" value="1"></label>
         <label>Max price $ <input id="max" type="number" min="0" step="0.01" placeholder="No limit"></label>
         <button type="submit">Add product</button>
@@ -30,7 +31,7 @@
       <p id="form-error" class="error" hidden></p>
       <div class="table-wrap">
         <table id="products">
-          <thead><tr><th>Product</th><th>Qty</th><th>Max price $</th><th>Status</th><th></th></tr></thead>
+          <thead><tr><th>Product</th><th>Option</th><th>Qty</th><th>Max price $</th><th>Status</th><th></th></tr></thead>
           <tbody></tbody>
         </table>
       </div>
