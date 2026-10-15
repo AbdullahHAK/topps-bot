@@ -139,7 +139,7 @@ class Engine:
         self._log("Log in to your Topps account in the Chrome window. The login is remembered for next time.")
 
     async def _start(self, settings: Settings) -> None:
-        if self.running:
+        if self.running or self._tasks:
             return
         products = list(settings.products)
         if not products:
@@ -170,13 +170,14 @@ class Engine:
     async def _stop(self, reason: str) -> None:
         if not self.running:
             return
-        self._set_running(False)
+        self.running = False  # tells finishing monitors not to report "all finished"
         tasks = list(self._tasks.values())
         for task in tasks:
             task.cancel()
         await asyncio.gather(*tasks, return_exceptions=True)
         self._tasks.clear()
         self._log(reason)
+        self._set_running(False)  # only now can a new Start begin
 
     async def _shutdown(self) -> None:
         await self._stop("Stopped")
@@ -204,7 +205,7 @@ class Engine:
                     if not info.in_stock:
                         self._status(product, info.reason + price)
                     elif product.max_price and info.price and info.price > product.max_price:
-                        self._status(product, f"In stock but{price} is over max ${product.max_price:.2f}")
+                        self._status(product, f"In stock but ${info.price:.2f} is over max ${product.max_price:.2f}")
                     else:
                         self._log(f"{name}: IN STOCK{price}")
                         if await self._buy(page, product):
