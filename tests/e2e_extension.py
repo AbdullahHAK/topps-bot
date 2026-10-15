@@ -139,7 +139,7 @@ def main() -> int:
             assert STATE["orders"] == [[(VARIANT_ID, 2)]], "no new order expected"
             print("   user completes payment by hand...")
             STATE["payment_ready"] = True
-            checkout = next(p for p in ctx.pages if "/checkouts/" in p.url)
+            checkout = next(p for p in reversed(ctx.pages) if p.url.endswith("/checkouts/cn/tok123"))
             checkout.click("#checkout-pay-button")
             wait_until(has_status("ORDER PLACED #T0PPS2"), "order placed after manual finish")
             wait_until(stopped, "auto stop")
