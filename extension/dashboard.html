@@ -1,0 +1,63 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Topps Bot</title>
+  <link rel="icon" href="icons/icon32.png">
+  <link rel="stylesheet" href="dashboard.css">
+</head>
+<body>
+  <header>
+    <img src="icons/icon48.png" alt="" width="32" height="32">
+    <h1>Topps Bot</h1>
+    <span id="state" class="state">STOPPED</span>
+    <div class="spacer"></div>
+    <button id="login" class="secondary">Open Topps / Log in</button>
+    <button id="start" class="start">Start</button>
+    <button id="stop" class="stop">Stop</button>
+  </header>
+
+  <main>
+    <section class="card">
+      <h2>Products to monitor</h2>
+      <form id="add-form">
+        <input id="url" type="url" placeholder="Paste a topps.com product URL (https://www.topps.com/products/...)" required>
+        <label>Qty <input id="qty" type="number" min="1" max="99" value="1"></label>
+        <label>Max price $ <input id="max" type="number" min="0" step="0.01" placeholder="No limit"></label>
+        <button type="submit">Add product</button>
+      </form>
+      <p id="form-error" class="error" hidden></p>
+      <div class="table-wrap">
+        <table id="products">
+          <thead><tr><th>Product</th><th>Qty</th><th>Max price $</th><th>Status</th><th></th></tr></thead>
+          <tbody></tbody>
+        </table>
+      </div>
+      <p id="empty" class="muted">No products yet - paste a product URL above.</p>
+    </section>
+
+    <section class="card">
+      <h2>Settings</h2>
+      <div class="settings">
+        <label>Check every <input id="intervalMin" type="number" min="5" max="600"> to
+          <input id="intervalMax" type="number" min="5" max="600"> seconds</label>
+        <label><input id="testMode" type="checkbox"> Test mode (open checkout, don't click Pay)</label>
+        <label><input id="clearCart" type="checkbox"> Empty cart before adding</label>
+        <label><input id="sound" type="checkbox"> Sound alerts</label>
+      </div>
+      <details>
+        <summary>Advanced: checkout selector overrides (JSON)</summary>
+        <textarea id="selectors" rows="4" spellcheck="false"></textarea>
+        <div class="row"><button id="saveSelectors" class="secondary">Save</button><span id="selectorsMsg" class="muted"></span></div>
+      </details>
+    </section>
+
+    <section class="card">
+      <h2>Activity log <button id="clearLog" class="link">Clear</button></h2>
+      <div id="log"></div>
+    </section>
+  </main>
+  <script type="module" src="dashboard.js"></script>
+</body>
+</html>
