@@ -176,6 +176,17 @@ def main() -> int:
             dash.click("#stop")
             wait_until(stopped, "stop")
 
+            print("8) Single-variant product (box, 'Default Title', no option buttons) -> test checkout reached")
+            dash.locator("#products tbody button.remove").first.click()
+            dash.fill("#url", f"{SHOP}/products/value-box")
+            dash.fill("#qty", "1")
+            dash.click("#add-form button[type=submit]")
+            wait_until(lambda: dash.locator("#products tbody tr").count() == 1, "value box row")
+            STATE.update(stock=True)
+            dash.click("#start")
+            wait_until(has_status("TEST OK"), "value box reached Pay button", timeout=60)
+            wait_until(stopped, "auto stop")
+
             dash.screenshot(path=str(ROOT / "tests" / "dashboard.png"), full_page=True)
             ctx.close()
     finally:

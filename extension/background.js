@@ -163,7 +163,14 @@ async function pageProduct(path, option) {
     if (r.status === 404) return { error: 'Product not found (404)' };
     if (!r.ok) return { error: `HTTP ${r.status}` };
 
-    const text = html.replace(/\\"/g, '"');
+    let text = html.replace(/\\"/g, '"');
+    // Box products embed sibling products (Hobby / Jumbo box…) too: keep only this page's product.
+    const productId = (html.match(/data-product-id="gid:\/\/shopify\/Product\/(\d+)"/) || [])[1];
+    const start = productId ? text.indexOf(`"id":"gid://shopify/Product/${productId}"`) : -1;
+    if (start >= 0) {
+      const end = text.indexOf('"aggregatedVariants"', start);
+      text = text.slice(start, end > start ? end : undefined);
+    }
     const variants = new Map();
     const productRe = /"price":\{"amount":"([\d.]+)","currencyCode":"[A-Z]+"\},"compareAtPrice":(?:null|\{[^}]*\}),"id":"gid:\/\/shopify\/ProductVariant\/(\d+)","sku":"[^"]*","title":"([^"]*)","availableForSale":(true|false)/g;
     for (const m of text.matchAll(productRe)) {
@@ -179,7 +186,7 @@ async function pageProduct(path, option) {
 
     const all = [...variants.values()];
     let variant;
-    if (option) {
+    if (option && all.length > 1) {
       const want = option.trim().toLowerCase();
       variant = all.find((v) => v.title.toLowerCase() === want);
       if (!variant) return { error: `Option "${option}" not found (options: ${all.map((v) => v.title).join(', ')})` };
@@ -187,7 +194,7 @@ async function pageProduct(path, option) {
       variant = all.find((v) => v.available) || all[0];
     }
     const title = (html.match(/<title>([^<]*)<\/title>/i) || [])[1] || '';
-    return { title: title.replace(/&amp;/g, '&').trim(), variant };
+    return { title: title.replace(/&amp;/g, '&').trim(), variant, optionCount: all.length };
   } catch (e) {
     return { error: String(e.message || e) };
   }
@@ -212,9 +219,12 @@ async function pageAddToCart(option, quantity, S) {
   if (!(await waitFor(addButton, 30000))) return { error: 'Add to cart button not found' };
   await sleep(1500); // let the page finish hydrating so clicks are handled
 
-  if (option) {
+  // Card products use option radios ("1 card", "5 cards"). Products without them (e.g. a box, where
+  // Hobby / Value / Jumbo are separate product pages) are bought as-is.
+  const radios = [...document.querySelectorAll(S.optionRadio)];
+  if (option && radios.length) {
     const want = option.trim().toLowerCase();
-    const radio = [...document.querySelectorAll(S.optionRadio)]
+    const radio = radios
       .find((r) => (r.getAttribute('aria-label') || '').split(' - ')[0].trim().toLowerCase() === want);
     if (!radio) return { error: `Option "${option}" is not on the page` };
     if (!radio.checked) {
@@ -363,7 +373,7 @@ async function checkProducts(products, settings) {
       setStatus(p.id, `In stock (${label}) - waiting for the current checkout to finish`, 'good');
     } else {
       await log(`${result.title || shortName(p.url)}: IN STOCK (${label})`);
-      await buy(p, variant, result.title || shortName(p.url), origin, settings);
+      await buy(p, { ...variant, optionCount: result.optionCount }, result.title || shortName(p.url), origin, settings);
     }
   }
 }
@@ -396,7 +406,7 @@ async function buy(p, variant, name, origin, settings) {
     await failed(p, reason);
     chrome.tabs.remove(tab.id).catch(() => {});
   };
-  const added = await runInTab(tab.id, pageAddToCart, p.option || variant.title, qty, selectors);
+  const added = await runInTab(tab.id, pageAddToCart, variant.optionCount > 1 ? (p.option || variant.title) : '', qty, selectors);
   if (!added.ok) return giveUp(`Add to cart failed: ${added.error}`);
 
   await log(`${name}: added ${qty} x ${variant.title} to cart - going to checkout`);

@@ -19,6 +19,7 @@ VARIANTS = [  # (variant id, title, price)
     ("111", "1 card", "8.99"),
     ("555", "5 cards", "34.99"),
 ]
+SINGLE = [("777", "Default Title", "24.99")]  # e.g. a Value Box: one variant, no option radios
 STATE: dict = {}
 
 
@@ -32,19 +33,19 @@ _lock = threading.Lock()
 CHALLENGE = "<html><head><title>Just a moment...</title></head><body>Verify you are human</body></html>"
 
 
-def product_page() -> str:
+def product_page(variants=VARIANTS) -> str:
     data = {"product": {"title": "2026 Topps Test Box", "variants": [
         {"price": {"amount": price, "currencyCode": "USD"}, "compareAtPrice": None,
          "id": f"gid://shopify/ProductVariant/{vid}", "sku": f"SKU{vid}", "title": title,
          "availableForSale": STATE["stock"]}
-        for vid, title, price in VARIANTS
+        for vid, title, price in variants
     ]}}
     rsc = json.dumps("6:" + json.dumps(data, separators=(",", ":")))
     radios = "".join(
         f'<label for="SKU{vid}"><input type="radio" id="SKU{vid}" name="variant-options" value="SKU{vid}" '
         f'data-vid="{vid}" aria-label="{title} - ${price}" {"checked" if i == 0 else ""}> {title}</label>'
-        for i, (vid, title, price) in enumerate(VARIANTS)
-    )
+        for i, (vid, title, price) in enumerate(variants)
+    ) if len(variants) > 1 else f'<input type="hidden" name="variant-single" data-vid="{variants[0][0]}">'
     button = ('<button data-testid="product-add-to-cart" onclick="add()">Add to cart</button>' if STATE["stock"]
               else '<button data-testid="product-add-to-cart" disabled>Sold out</button>')
     return f"""<html><head><title>2026 Topps Test Box</title></head><body>
@@ -60,7 +61,7 @@ def product_page() -> str:
 let checkoutUrl;
 function q(d) {{ const i = document.querySelector('input[name=quantity]'); i.value = Math.max(1, Number(i.value) + d); }}
 async function add() {{
-  const variant = document.querySelector('input[name=variant-options]:checked').dataset.vid;
+  const variant = (document.querySelector('input[name=variant-options]:checked') || document.querySelector('input[name=variant-single]')).dataset.vid;
   const qty = Number(document.querySelector('input[name=quantity]').value);
   const r = await fetch('/api/cart/add', {{method: 'POST', body: JSON.stringify({{variant, qty}})}});
   const j = await r.json();
@@ -120,6 +121,8 @@ class Handler(BaseHTTPRequestHandler):
                 self._send(f"<html><head><title>Topps</title></head><body>{path}</body></html>")
             elif path == "/products/test-box":
                 self._send(product_page())
+            elif path == "/products/value-box":
+                self._send(product_page(SINGLE))
             elif path == "/checkout/cart":
                 cart = STATE["carts"].get(self._cart_id() or "", [])
                 body = ("<button onclick=\"location.href='/checkouts/cn/%s/en-us'\">Proceed to checkout</button>"
