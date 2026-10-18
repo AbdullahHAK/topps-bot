@@ -126,7 +126,7 @@ def main() -> int:
             wait_until(stopped, "stop")
             STATE["limit"] = 0
 
-            print("4) Live mode with leftover cart items -> cart emptied via Remove, agreement ticked, order placed")
+            print("4) Live mode with leftover cart items -> cart emptied via Remove, order placed, checkboxes untouched")
             dash.uncheck("#testMode")
             STATE["cart"] = [("111", 9), ("999", 1)]  # leftovers on the account, e.g. an unavailable item
             dash.click("#start")

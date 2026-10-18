@@ -520,7 +520,7 @@ async function onCheckoutMessage(msg, sender) {
     case 'checkout:test_ok':
       setStatus(p.id, 'TEST OK - checkout reached, Pay button found (not clicked)', 'good');
       await log(`${name}: test run reached the Pay button - no order placed`);
-      if (settings.clearCart) await clearCart(originOf(p.url));
+      await clearCart(originOf(p.url)); // a test run must never leave items behind for a live run
       await finishProduct(p.id);
       return {};
     case 'checkout:success': {

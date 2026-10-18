@@ -19,16 +19,6 @@
     return null;
   }
 
-  // Required "I agree" boxes (e.g. Topps' product agreement); never marketing opt-ins.
-  function tickAgreements() {
-    for (const box of document.querySelectorAll('input[type="checkbox"]')) {
-      if (box.checked || !box.getClientRects().length) continue;
-      const label = (document.querySelector(`label[for="${CSS.escape(box.id)}"]`)?.textContent
-        || box.closest('label')?.textContent || box.getAttribute('aria-label') || '').toLowerCase();
-      if (/agree|acknowledge|terms/.test(label) && !/news|offers|text me|save this/.test(label)) box.click();
-    }
-  }
-
   (async () => {
     const cfg = await send('checkout:hello');
     if (!cfg?.drive) return;
@@ -74,8 +64,6 @@
 
     if (cfg.testMode) return send('checkout:test_ok');
 
-    tickAgreements();
-    await sleep(500);
     send('checkout:status', { text: 'Clicking Pay now...' });
     payButton().click();
     // On success the page navigates to the thank-you page and this script starts over there.
