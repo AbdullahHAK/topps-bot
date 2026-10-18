@@ -184,7 +184,7 @@ async function pageProduct(path, option) {
     const r = await fetch(path, { cache: 'no-store', credentials: 'same-origin' });
     const html = await r.text();
     if ([403, 429, 503].includes(r.status) || /<title>\s*Just a moment/i.test(html)) return { challenge: true };
-    if (r.status === 404) return { error: 'Product not found (404)' };
+    if (r.status === 404) return { notFound: true };
     if (!r.ok) return { error: `HTTP ${r.status}` };
 
     let text = html.replace(/\\"/g, '"');
@@ -268,7 +268,7 @@ async function pageAddToCart(option, quantity, S) {
   }
 
   const button = addButton();
-  if (button.disabled || /sold out|out of stock/i.test(button.textContent)) return { error: 'Sold out' };
+  if (button.disabled || button.dataset.soldOut === 'true' || /sold out|out of stock/i.test(button.textContent)) return { error: 'Sold out' };
   button.click();
 
   const result = await waitFor(() => {
@@ -399,6 +399,10 @@ async function checkProducts(products, settings) {
     if (run.challenge) {
       await updateRun((r) => ({ ...r, challenge: false }));
       await log('Cloudflare check passed - monitoring resumed');
+    }
+    if (result.notFound) {
+      setStatus(p.id, 'Not released yet (product page not found) - checking again');
+      continue;
     }
     if (result.error) {
       setStatus(p.id, `Error: ${result.error}`, 'bad');

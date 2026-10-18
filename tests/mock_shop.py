@@ -74,6 +74,7 @@ async function add() {{
 
 CHECKOUT = """<html><head><title>Checkout - Topps</title></head><body>
 <h1>Checkout</h1><p id="msg"></p>
+<input name="address1" value="1 Test St"><input name="postalCode" value="92688">
 <label><input type="checkbox" id="marketing_opt_in"> Email me with news and offers</label>
 <label for="agree"><input type="checkbox" id="agree"> I agree to the Topps product terms</label>
 <button id="checkout-pay-button" type="submit" disabled>Pay now</button>

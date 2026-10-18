@@ -63,6 +63,15 @@
       stableFor = usable(payButton()) ? stableFor + 250 : 0;
     }
 
+    // Pay now is enabled even on an empty form, so check the shipping address is actually filled in.
+    const emptyAddress = [...document.querySelectorAll('input[name="address1"], input[name="postalCode"]')]
+      .some((input) => input.getClientRects().length && !input.value.trim());
+    if (emptyAddress) {
+      return send('checkout:needs_user', {
+        reason: 'Shipping address is empty - fill it in (or save a default address in the Topps account)',
+      });
+    }
+
     if (cfg.testMode) return send('checkout:test_ok');
 
     tickAgreements();
