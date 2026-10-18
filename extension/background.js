@@ -141,15 +141,39 @@ async function inWorker(origin, func, ...args) {
 }
 
 // Deleting the cart cookies makes topps.com start a fresh, empty cart.
-async function clearCart(origin) {
+// Empties the cart with the cart page's own "Remove" buttons (a logged-in cart lives on the account, so
+// dropping the cart cookie alone is not enough), then drops the cart cookies too.
+// Uses `tabId` if given, otherwise a temporary background tab.
+async function clearCart(origin, tabId = null) {
+  const tab = tabId ?? (await chrome.tabs.create({ url: 'about:blank', active: false })).id;
+  try {
+    await chrome.tabs.update(tab, { url: `${origin}/checkout/cart` });
+    await waitForTabLoad(tab);
+    let removed = 0;
+    for (let i = 0; i < 40; i++) {
+      const step = await runInTab(tab, pageRemoveOneCartItem, i === 0 ? 15000 : 8000);
+      if (step.empty) break;
+      if (step.removed) {
+        removed += 1;
+        await new Promise((r) => setTimeout(r, 1500)); // let the removal finish (and any reload start)
+        await waitForTabLoad(tab, 15000);
+        continue;
+      }
+      if (!/Frame|context|navigat|closed/i.test(step.error || '')) {
+        await log(`Could not empty the cart: ${step.error}`, 'warn');
+        break;
+      }
+      await waitForTabLoad(tab, 15000); // script was cut off by a reload - look again
+    }
+    if (removed) await log(`Cart emptied (${removed} item(s) removed)`);
+  } finally {
+    if (tabId == null) chrome.tabs.remove(tab).catch(() => {});
+  }
   const cookies = await chrome.cookies.getAll({ domain: new URL(origin).hostname.replace(/^www\./, '') });
-  let removed = 0;
   for (const c of cookies.filter((x) => CART_COOKIES.includes(x.name))) {
     const host = c.domain.replace(/^\./, '');
     await chrome.cookies.remove({ url: `http${c.secure ? 's' : ''}://${host}${c.path}`, name: c.name });
-    removed += 1;
   }
-  if (removed) await log('Cart emptied');
 }
 
 // ---------- functions injected into topps.com pages (must be self-contained) ----------
@@ -255,6 +279,24 @@ async function pageAddToCart(option, quantity, S) {
     return error ? { error: error[1].trim() } : null;
   }, 20000);
   return result || { error: 'No confirmation after clicking Add to cart' };
+}
+
+// Runs on /checkout/cart: clicks one "Remove" (including on unavailable items), or reports the cart is empty.
+// One click per call, because removing may reload the page and end this script.
+async function pageRemoveOneCartItem(timeout) {
+  const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+  const end = Date.now() + timeout;
+  while (Date.now() < end) {
+    if (/your cart's empty/i.test(document.body.innerText)) return { empty: true };
+    const remove = [...document.querySelectorAll('[role="button"], button')]
+      .find((e) => e.textContent.trim().toLowerCase() === 'remove' && e.getClientRects().length);
+    if (remove) {
+      remove.click();
+      return { removed: true };
+    }
+    await sleep(250);
+  }
+  return { error: 'cart page did not show items or "Your cart is empty"' };
 }
 
 // Runs in the buy tab after adding: clicks "Continue to Checkout" in the cart pop-up or "Proceed to checkout" on the cart page.
@@ -396,7 +438,7 @@ async function buy(p, variant, name, origin, settings) {
   const tab = await chrome.tabs.create({ url: 'about:blank', active: true });
   await updateRun((r) => ({ ...r, checkout: { productId: p.id, tabId: tab.id, started: Date.now() } }));
   alertUser('In stock!', `${name} - adding ${qty} x ${variant.title} to cart`);
-  if (settings.clearCart) await clearCart(origin);
+  if (settings.clearCart) await clearCart(origin, tab.id);
 
   setStatus(p.id, `Adding ${qty} x ${variant.title} to cart...`, 'good');
   await chrome.tabs.update(tab.id, { url: p.url });

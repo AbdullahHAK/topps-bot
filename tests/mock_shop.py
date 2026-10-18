@@ -24,7 +24,7 @@ STATE: dict = {}
 
 
 def reset() -> None:
-    STATE.update(stock=False, carts={}, orders=[], challenge=False, payment_ready=True, limit=0)
+    STATE.update(stock=False, cart=[], orders=[], challenge=False, payment_ready=True, limit=0)
 
 
 reset()
@@ -55,7 +55,7 @@ def product_page(variants=VARIANTS) -> str:
 <button aria-label="Increase quantity by one" onclick="q(1)">+</button>
 {button}
 <p id="msg"></p>
-<div id="popover" style="display:none">Added to cart <button onclick="location.href=checkoutUrl">Continue to Checkout</button></div>
+<div id="popover" role="dialog" style="display:none"><h2>Added to cart</h2><button onclick="location.href=checkoutUrl">Proceed to checkout</button> <a href="/checkout/cart">Go to cart</a></div>
 <script>self.__next_f = []; self.__next_f.push([1,{rsc}])</script>
 <script>
 let checkoutUrl;
@@ -108,10 +108,6 @@ class Handler(BaseHTTPRequestHandler):
     def _json(self, obj, status: int = 200, headers=()) -> None:
         self._send(json.dumps(obj), status, "application/json", headers)
 
-    def _cart_id(self) -> str | None:
-        match = re.search(r"(?:^|;\s*)cart_id=([^;]+)", self.headers.get("Cookie") or "")
-        return match.group(1) if match else None
-
     def do_GET(self):
         path = urlparse(self.path).path
         with _lock:
@@ -124,9 +120,12 @@ class Handler(BaseHTTPRequestHandler):
             elif path == "/products/value-box":
                 self._send(product_page(SINGLE))
             elif path == "/checkout/cart":
-                cart = STATE["carts"].get(self._cart_id() or "", [])
-                body = ("<button onclick=\"location.href='/checkouts/cn/%s/en-us'\">Proceed to checkout</button>"
-                        % self._cart_id()) if cart else "Your cart's empty"
+                lines = "".join(
+                    f'<div class="line">{vid} x{qty} <div role="button" class="underline" onclick="rm({i})">Remove</div></div>'
+                    for i, (vid, qty) in enumerate(STATE["cart"]))
+                body = (lines + "<button onclick=\"location.href='/checkouts/cn/acct/en-us'\">Proceed to checkout</button>"
+                        "<script>async function rm(i){await fetch('/api/cart/remove',{method:'POST',body:JSON.stringify({i})});"
+                        "location.reload();}</script>") if STATE["cart"] else "Your cart's empty"
                 self._send(f"<html><head><title>Cart</title></head><body>{body}</body></html>")
             elif re.fullmatch(r"/checkouts/cn/[\w-]+/en-us", path):
                 self._send(CHECKOUT)
@@ -146,20 +145,19 @@ class Handler(BaseHTTPRequestHandler):
                     return self._json({"error": "Failed to add to cart"})
                 if STATE["limit"] and body["qty"] > STATE["limit"]:
                     return self._json({"error": f"You've hit the limit — only {STATE['limit']} of this product per household."})
-                cart_id = self._cart_id()
-                headers = []
-                if not cart_id or cart_id not in STATE["carts"]:
-                    cart_id = uuid.uuid4().hex[:10]
-                    STATE["carts"][cart_id] = []
-                    headers.append(("Set-Cookie", f"cart_id={cart_id}; Path=/"))
-                STATE["carts"][cart_id].append((body["variant"], body["qty"]))
-                self._json({"ok": True, "checkoutUrl": f"/checkouts/cn/{cart_id}/en-us"}, headers=headers)
-            elif match := re.fullmatch(r"/checkouts/cn/([\w-]+)/complete", path):
+                # Logged-in carts live on the account: the cookie is set, but the cart is not tied to it.
+                STATE["cart"].append((body["variant"], body["qty"]))
+                self._json({"ok": True, "checkoutUrl": "/checkouts/cn/acct/en-us"},
+                           headers=[("Set-Cookie", f"cart_id={uuid.uuid4().hex[:10]}; Path=/")])
+            elif path == "/api/cart/remove":
+                if body["i"] < len(STATE["cart"]):
+                    STATE["cart"].pop(body["i"])
+                self._json({})
+            elif path == "/checkouts/cn/acct/complete":
                 if not STATE["payment_ready"]:
                     return self._json({"error": "payment"}, 400)
-                STATE["orders"].append({"items": list(STATE["carts"].get(match.group(1), [])),
-                                        "marketing": body.get("marketing")})
-                STATE["carts"].pop(match.group(1), None)
+                STATE["orders"].append({"items": list(STATE["cart"]), "marketing": body.get("marketing")})
+                STATE["cart"].clear()
                 self._json({})
             else:
                 self._send("Not found", 404)

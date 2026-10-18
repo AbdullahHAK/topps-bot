@@ -75,9 +75,6 @@ def main() -> int:
             def log_text() -> str:
                 return dash.locator("#log").inner_text()
 
-            def cart_cookie():
-                return [c for c in ctx.cookies(SHOP) if c["name"] == "cart_id"]
-
             def row_input(index: int):
                 return dash.locator("#products tbody input").nth(index)  # 0 option, 1 qty, 2 max price
 
@@ -110,7 +107,7 @@ def main() -> int:
             wait_until(has_status("TEST OK"), "test mode reached Pay button", timeout=60)
             wait_until(stopped, "auto stop after all products done")
             assert STATE["orders"] == [], STATE["orders"]
-            assert cart_cookie() == [], f"cart cookie should be removed after a test run: {cart_cookie()}"
+            wait_until(lambda: STATE["cart"] == [], "cart emptied after the test run")
 
             print("2) Max price below product price -> does not buy")
             set_input(2, "10")
@@ -129,10 +126,9 @@ def main() -> int:
             wait_until(stopped, "stop")
             STATE["limit"] = 0
 
-            print("4) Live mode with a stale cart -> cart emptied, agreement ticked, order placed")
+            print("4) Live mode with leftover cart items -> cart emptied via Remove, agreement ticked, order placed")
             dash.uncheck("#testMode")
-            STATE["carts"]["stale"] = [("111", 9)]
-            ctx.add_cookies([{"name": "cart_id", "value": "stale", "url": SHOP}])
+            STATE["cart"] = [("111", 9), ("999", 1)]  # leftovers on the account, e.g. an unavailable item
             dash.click("#start")
             wait_until(has_status("ORDER PLACED #T0PPS1"), "order placed", timeout=60)
             assert STATE["orders"] == [{"items": [("555", 2)], "marketing": False}], STATE["orders"]
